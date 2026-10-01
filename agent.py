@@ -61,8 +61,11 @@ tools = types.Tool(
     ]
 )
 
-# User's question
-user_question = "what is 20% of 100?"
+# Start conversation history
+contents = []
+
+# Get user's first question
+user_question = input("You:")
 
 # Start conversation with the user message
 contents = [
@@ -153,5 +156,17 @@ while True:
 
     else:
         # No more tools needed 
-        print("Final Answer:", response.text)
-        break
+        print("Agent:", response.text)
+
+        # Get next user message
+        user_question = input("You: ")
+
+        # Add next user message to conversation history
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part(text=user_question)
+                ]
+            )
+        )
