@@ -64,8 +64,17 @@ tools = types.Tool(
 # Start conversation history
 contents = []
 
+MAX_TURNS = 5
+conversation_turns = 0
+turn_start_indexes = []
+
 # Get user's first question
 user_question = input("You:")
+
+if user_question.lower() in ["exit", "quit"]:
+    exit()
+
+turn_start_indexes.append(len(contents))
 
 # Start conversation with the user message
 contents = [
@@ -76,6 +85,8 @@ contents = [
         ]
     )
 ]
+
+conversation_turns +=1
 
 available_tools = {
     "calculator": calculator,
@@ -161,6 +172,11 @@ while True:
         # Get next user message
         user_question = input("You: ")
 
+        if user_question.lower() in ["exit", "quit"]:
+            break
+
+        turn_start_indexes.append(len(contents))
+
         # Add next user message to conversation history
         contents.append(
             types.Content(
@@ -170,3 +186,24 @@ while True:
                 ]
             )
         )
+
+        conversation_turns += 1
+
+        if conversation_turns > MAX_TURNS:
+
+            trim_index = turn_start_indexes[1]
+
+            contents = contents[trim_index:]
+
+            turn_start_indexes = [
+                index - trim_index
+                for index in turn_start_indexes[1:]
+            ]
+
+            conversation_turns -= 1
+
+            print("Trimmed old turn")
+
+        print("History length:", len(contents))
+        print("Conversation turns:", conversation_turns)
+        print("Turn start indexes:", turn_start_indexes)
