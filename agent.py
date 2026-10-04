@@ -61,12 +61,62 @@ tools = types.Tool(
     ]
 )
 
+def update_summary(old_history, current_summary):
+
+    summary_prompt = f"""
+You are a memory summerization system.
+
+Current summary:
+{current_summary}
+
+New conversation history:
+{old_history}
+
+Create an updated concise summary of the important information
+that should be remembered for future conversation.
+
+Keep important facts, user preferences, ongoing goals, and project context.
+Do not include temporary questions, calculations, or irrelevant details.
+
+Return only the updated summary.
+"""
+
+    response = client.models.generate_content(
+        model ="gemini-3.1-flash-lite",
+        contents=summary_prompt,
+    )
+
+    return response.text
+
+def load_memory():
+
+    with open("memory.json", "r") as file:
+        return json.load(file)
+
+def save_memory(memory):
+
+    with open("memory.json", "w") as file:
+        json.dump(memory, file, indent=4)
+
+# memory = load_memory()
+
+# print("Loaded memory:", memory)
+
+# memory["name"] = "Vivek"
+
+# save_memory(memory)
+
+# print("Saved memory:", memory)
+
 # Start conversation history
 contents = []
+
+memory = load_memory()
 
 MAX_TURNS = 5
 conversation_turns = 0
 turn_start_indexes = []
+summary = ""
 
 # Get user's first question
 user_question = input("You:")
@@ -96,12 +146,48 @@ available_tools = {
 # Agent Loop
 while True:
 
+    context = contents
+
+    if summary:
+        context = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part(
+                        text=f"Memory summary:\n{summary}"
+                    )
+                ]
+            )
+        ] + contents
+
+    # if memory:
+    #         context = [
+    #             types.Content(
+    #                 role="user",
+    #                 parts=[
+    #                     types.Part(
+    #                         text=f"Long-term memory:\n{memory}"
+    #                     )
+    #                 ]
+    #             )
+    #         ] + context
+
+    # print("Debug memory:", memory)
+    # print("Debug context:", context)
+
     # Ask Gemin wants to use a tool
     response = client.models.generate_content(
         model="gemini-3.1-flash-lite",
         contents=contents,
         config=types.GenerateContentConfig(
-            tools=[tools]
+            tools=[tools],
+            system_instruction=f"""
+        You are an AI assistant.
+
+        Long-term memory:
+        {memory}
+        """
+
         ),
     )
 
@@ -192,6 +278,13 @@ while True:
         if conversation_turns > MAX_TURNS:
 
             trim_index = turn_start_indexes[1]
+
+            old_history = contents[:trim_index]
+
+            summary = update_summary(old_history, summary)
+
+            print("Current summary:", summary)
+            # print("Old history:", old_history)
 
             contents = contents[trim_index:]
 
