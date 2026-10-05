@@ -97,6 +97,84 @@ def save_memory(memory):
 
     with open("memory.json", "w") as file:
         json.dump(memory, file, indent=4)
+        
+def extract_memory(user_message):
+
+    prompt = f"""
+You are a memory extraction system.
+
+Analyze the user's message and identify information that is useful
+to remember for future conversations.
+
+Only extract stable and useful information such as:
+- Name
+- Preferences
+- Long-term goals
+- Important project context
+
+Use this JSON structure when possible:
+
+{{
+    "name": "...",
+    "preferences": {{
+        "...": "..."
+    }},
+    "long_term_goals": "...",
+    "project_context": "..."
+}}
+
+Rules:
+- Put programming language preferences inside "preferences".
+- Do not create duplicate top-level keys for information already represented
+  inside "preferences".
+- Do not create keys like "preferred_programming_language" if the same
+  information can be stored as "preferences": {{"programming_language": "..."}}.
+- Only include keys for information actually found in the user's message.
+
+Do not extract temporary questions, calculations, weather,
+or casual conversation.
+
+User message:
+{user_message}
+
+Return ONLY valid JSON.
+
+If there is no useful memory, return:
+{{}}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-lite",
+        contents=prompt,
+    )
+
+    return json.loads(response.text)
+
+def merge_memory(existing_memory, new_memory):
+
+    for key, value in new_memory.items():
+
+        if isinstance(value, dict) and isinstance(existing_memory.get(key), dict):
+            existing_memory[key].update(value)
+
+        else:
+            existing_memory[key] = value
+
+    return existing_memory
+
+# memory = load_memory()
+
+# new_memory = extract_memory(
+#     "I am working on an AI Research Agent project."
+# )
+
+# print("Extracted memory:", new_memory)
+
+# memory = merge_memory(memory, new_memory)
+
+# save_memory(memory)
+
+# print("Updated memory:", memory)
 
 # memory = load_memory()
 
@@ -178,7 +256,7 @@ while True:
     # Ask Gemin wants to use a tool
     response = client.models.generate_content(
         model="gemini-3.1-flash-lite",
-        contents=contents,
+        contents=context,
         config=types.GenerateContentConfig(
             tools=[tools],
             system_instruction=f"""
@@ -262,6 +340,14 @@ while True:
             break
 
         turn_start_indexes.append(len(contents))
+
+        new_memory = extract_memory(user_question)
+
+        if new_memory:
+            memory = merge_memory(memory, new_memory)
+            save_memory(memory)
+
+            print("Updated long-term memory:", memory)
 
         # Add next user message to conversation history
         contents.append(

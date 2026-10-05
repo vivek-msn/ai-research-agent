@@ -1,3 +1,7 @@
 {
-    "name": "Vivek"
+    "name": "Vivek",
+    "preferences": {
+        "programming_language": "python"
+    },
+    "project_context": "Building an AI Research Agent"
 }
