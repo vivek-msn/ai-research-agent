@@ -124,11 +124,12 @@ User goal:
 
     return json.loads(response.text)
 
+
 def execute_task_with_tools(task_description):
 
     response = client.models.generate_content(
-        model = "gemini-3.1-flash-lite",
-        contents = (
+        model="gemini-3.1-flash-lite",
+        contents=(
             "Execute the following task using the available tools "
             "when appropriate. If a tool is not suitable, explain "
             "what cannot be executed.\n\n"
@@ -139,18 +140,26 @@ def execute_task_with_tools(task_description):
         ),
     )
 
-    if response.function_calls:
-        available_tools = {
+    # Check whether Gemini returned any tool calls
+    if not response.function_calls:
+        return {
+            "status": "failed",
+            "error": "No tool call was returned for this task."
+        }
+
+    available_tools = {
         "calculator": calculator,
         "get_weather": get_weather
     }
 
     tool_results = []
 
+    # Execute every tool call returned by Gemini
     for function_call in response.function_calls:
 
         tool = available_tools.get(function_call.name)
 
+        # Check whether tool exists
         if tool is None:
             return {
                 "status": "failed",
@@ -172,14 +181,10 @@ def execute_task_with_tools(task_description):
                 "error": str(e)
             }
 
-        return {
-            "status": "completed",
-            "tool_results": tool_results
-        }
-
+    # Return after all tool calls are executed
     return {
-        "status": "failed",
-        "error": "No tool call was returned for this task."
+        "status": "completed",
+        "tool_results": tool_results
     }
 
 
