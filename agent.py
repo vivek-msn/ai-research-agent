@@ -88,6 +88,317 @@ Return only the updated summary.
 
     return response.text
 
+def generate_plan(goal):
+
+    plan_prompt= f"""
+You are a planning system for an AI agent.
+
+Break the user's goal into clear, actionable tasks.
+
+Rules:
+- Create only the tasks required to achieve the goal.
+- Keep tasks simple and executable.
+- Maintain the correct order when dependencies exists.
+- Do not perform the tasks.
+- Return ONLY valid JSON.
+
+Use this structure:
+
+{{
+    "goal": "{goal}",
+    "tasks": [
+        {{
+            "id": 1,
+            "task": "..."
+        }}
+    ]
+}}
+
+User goal:
+{goal}
+"""
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-lite",
+        contents=plan_prompt,
+    )
+
+    return json.loads(response.text)
+
+def execute_task_with_tools(task_description):
+
+    response = client.models.generate_content(
+        model = "gemini-3.1-flash-lite",
+        contents = (
+            "Execute the following task using the available tools "
+            "when appropriate. If a tool is not suitable, explain "
+            "what cannot be executed.\n\n"
+            f"Task: {task_description}"
+        ),
+        config=types.GenerateContentConfig(
+            tools=[tools]
+        ),
+    )
+
+    if response.function_calls:
+        available_tools = {
+        "calculator": calculator,
+        "get_weather": get_weather
+    }
+
+    tool_results = []
+
+    for function_call in response.function_calls:
+
+        tool = available_tools.get(function_call.name)
+
+        if tool is None:
+            return {
+                "status": "failed",
+                "error": f"Unknown tool: {function_call.name}"
+            }
+
+        try:
+            result = tool(**function_call.args)
+
+            tool_results.append({
+                "tool": function_call.name,
+                "arguments": function_call.args,
+                "result": result
+            })
+
+        except Exception as e:
+            return {
+                "status": "failed",
+                "error": str(e)
+            }
+
+        return {
+            "status": "completed",
+            "tool_results": tool_results
+        }
+
+    return {
+        "status": "failed",
+        "error": "No tool call was returned for this task."
+    }
+
+
+def execute_plan(plan, previous_results=None):
+
+    results = previous_results.copy() if previous_results else []
+
+    for task in plan["tasks"]:
+
+        already_completed = any(
+            result.get("task_id") == task["id"]
+            and result.get("status") == "completed"
+            for result in results
+        )
+
+        if already_completed:
+            print(f"Task {task['id']} already completed. Skipping.")
+            continue
+
+        task_results = {
+            "task_id": task["id"],
+            "task": task["task"],
+            "status": "pending"
+        }
+
+        print(f"Task {task['id']}: {task['task']}")
+        print("Status:", task_results["status"])
+
+        # Task start execution
+        task_results["status"] = "running"
+        print("Status:", task_results["status"])
+
+        # Simulated successful execution
+        # task_results["status"] = "completed"
+        # print("Status:", task_results["status"])
+
+        max_retries = 2
+        retries = 0
+
+        while True:
+
+            execution = execute_task_with_tools(task["task"])
+
+            task_results["results"] = execution
+
+            if execution["status"] == "completed":
+                task_results["status"] = "completed"
+                print("Status:", task_results["status"])
+                break
+
+            task_results["status"] = "failed"            
+            print("Status:", task_results["status"])
+
+            if retries >= max_retries:
+                print("Maximum retries reached.")
+                break
+
+            retries +=1
+            print(f"Retry attempt {retries}...")
+            task_results["status"] = "running"
+            print("Status:", task_results["status"])
+
+        results.append(task_results)
+
+    return results
+
+MAX_REPLANS = 2
+
+replans = 0
+
+def replan(plan, failure_reason):
+
+    print("Re-planning...")
+    print("Failure reason:", failure_reason)
+
+    replan_prompt = f"""
+You are a re-planning system for an AI agent.
+
+The current plan failed during execution.
+
+Current Plan:
+{json.dumps(plan, indent=4)}
+
+Failure Reason:
+{failure_reason}
+
+Creat a modified plan that can continue toward the original goal.
+
+Rules:
+- Keep successful tasks unchanged where possible.
+- Modify or replace the failed task.
+- Do not unnecessarily change completed tasks.
+- Return ONLY valid JSON.
+- Use the same structure as the original plan.
+
+Return:
+{{
+    "goal": "...",
+    "tasks": [
+        {{
+            "id": 1,
+            "task": "..."
+        }}
+    ]
+}}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-lite",
+        contents=replan_prompt
+    )
+
+    new_plan = json.loads(response.text)
+
+    return new_plan
+
+def orchestrate_plan(goal):
+
+    plan = generate_plan(goal)
+
+    previous_results = []
+
+    if not validate_plan(plan):
+        print("Invalid initial plan. Stopping.")
+        return []
+
+    replans = 0
+
+    while True:
+
+        print("\nExecuting current plan...")
+
+        results = execute_plan(
+            plan,
+            previous_results=previous_results
+        )
+
+        previous_results = results
+
+        # failed_tasks = [
+        #     task for task in results
+        #     if task.get("status") == 'failed'
+        # ]
+
+        # Keep th latest result for each task
+        latest_results = {}
+
+        for task in results:
+            task_id = task.get("task_id")
+            latest_results[task_id] = task
+
+        # Identify tasks whose latest status is failed
+        failed_tasks = [
+            task for task in latest_results.values()
+            if task.get("status") == "failed"
+        ]
+
+        # Stop if every task completed successfully
+        if latest_results and all(
+            task.get("status") == "completed"
+            for task in latest_results.values()
+        ):
+            print("Plan completed successfully!")
+            return results
+        
+         # Stop if no task failed but execution is incomplete
+        if not failed_tasks:
+            print("Execution incomplete. Stopping.")
+            return results
+
+        # Check re-planning limit
+        if replans >= MAX_REPLANS:
+            print("Maximum re-planning limit reached. Stopping.")
+            return results
+
+        failure_reason = "; ".join(
+            f"Task {task.get('task_id')} failed: {task.get('task', '')}"
+            for task in failed_tasks
+        )
+
+        replans += 1
+
+        print(f"\nRe-planning attempt {replans}...")
+        print("Failure reason:", failure_reason)
+
+        new_plan = replan(plan, failure_reason)
+
+        if not validate_plan(new_plan):
+            print("New plan is invalid. Stopping.")
+            return results
+
+        plan = new_plan
+
+def validate_plan(plan):
+
+    if not isinstance(plan, dict):
+        return False
+
+    if not plan.get("goal"):
+        return False
+
+    tasks = plan.get("tasks")
+
+    if not isinstance(tasks, list) or not tasks:
+        return False
+
+    for task in tasks:
+
+        if not isinstance(task, dict):
+            return False
+
+        if "id" not in task:
+            return False
+
+        if not task.get("task"):
+            return False
+
+    return True
+
 def load_memory():
 
     with open("memory.json", "r") as file:
@@ -97,6 +408,129 @@ def save_memory(memory):
 
     with open("memory.json", "w") as file:
         json.dump(memory, file, indent=4)
+
+# Testing
+
+# test_result = execute_task_with_tools(
+#     "Calculate 25 multiplied by 4 using the calculator tool."
+# )
+
+# print("\nHelper Test Result:")
+# print(json.dumps(test_result, indent=4))
+
+# exit()
+
+# Temporary Planner Test
+
+# test_plan = generate_plan(
+#     "Research RAG vs Fine-tuning, compare them, and recommend which one is better for a document question-answering application."
+# )
+
+# print("Generated Plan:")
+# print(json.dumps(test_plan, indent=4))
+
+# is_valid = validate_plan(test_plan)
+
+# print("Plan valid:", is_valid)
+
+# results = execute_plan(test_plan)
+
+# # new_plan = replan(
+# #     test_plan,
+# #     "Task 3 failed after retry"
+# # )
+
+# replans = 0
+# current_plan = test_plan
+
+# while replans < MAX_REPLANS:
+
+#     replans +=1
+
+#     print(f"Re-planning attempt {replans}...")
+
+#     current_plan = replan(
+#         current_plan,
+#         "Task 3 failed after retry"
+#     )
+
+#     print("New Plan:")
+#     print(json.dumps(current_plan,indent=4))
+
+# print("Maximum re-planning limit reached.")
+
+# print("Execution Results:")
+# print(json.dumps(results, indent=4))
+
+# print("Validating New Plan...")
+
+# if validate_plan(current_plan):
+
+#     print("New Plan is valid!")
+
+#     new_results = execute_plan(current_plan)
+
+#     print("New Execution Results:")
+#     print(json.dumps(new_results, indent=4))
+
+# else:
+#     print("New Plan is invalid. Execution stopped.")
+
+# exit()
+
+
+
+# Temporary Planner Test
+
+# test_plan = {
+#     "goal": "Test calculator execution",
+#     "tasks": [
+#         {
+#             "id": 1,
+#             "task": "Calculate 25 multiplied by 4 using the calculator tool."
+#         }
+#     ]
+# }
+
+# results = execute_plan(test_plan)
+
+# print("\nFinal Execution Results:")
+# print(json.dumps(results, indent=4))
+
+# exit()
+
+
+# Temporary Retry Test
+
+# def mock_failed_execution(task_description):
+#     print("Simulating task failure...")
+#     return {
+#         "status": "failed",
+#         "error": "Temporary test failure"
+#     }
+
+# original_executor = execute_task_with_tools
+# execute_task_with_tools = mock_failed_execution
+
+# test_plan = {
+#     "goal": "Test retry handling",
+#     "tasks": [
+#         {
+#             "id": 1,
+#             "task": "Simulate a task failure"
+#         }
+#     ]
+# }
+
+# results = execute_plan(test_plan)
+
+# print("\nRetry Test Results:")
+# print(json.dumps(results, indent=4))
+
+# execute_task_with_tools = original_executor
+# exit()
+
+
         
 def extract_memory(user_message):
 
@@ -187,202 +621,216 @@ def merge_memory(existing_memory, new_memory):
 # print("Saved memory:", memory)
 
 # Start conversation history
-contents = []
 
-memory = load_memory()
+def main():
 
-MAX_TURNS = 5
-conversation_turns = 0
-turn_start_indexes = []
-summary = ""
+    contents = []
 
-# Get user's first question
-user_question = input("You:")
+    memory = load_memory()
 
-if user_question.lower() in ["exit", "quit"]:
-    exit()
+    MAX_TURNS = 5
+    conversation_turns = 0
+    turn_start_indexes = []
+    summary = ""
 
-turn_start_indexes.append(len(contents))
+    # Get user's first question
+    user_question = input("You:")
 
-# Start conversation with the user message
-contents = [
-    types.Content(
-        role="user",
-        parts=[
-            types.Part(text=user_question)
-        ]
-    )
-]
+    if user_question.lower() in ["exit", "quit"]:
+        exit()
 
-conversation_turns +=1
+    turn_start_indexes.append(len(contents))
 
-available_tools = {
-    "calculator": calculator,
-    "get_weather": get_weather
-}
+    # Start conversation with the user message
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part(text=user_question)
+            ]
+        )
+    ]
 
-# Agent Loop
-while True:
+    conversation_turns +=1
 
-    context = contents
+    available_tools = {
+        "calculator": calculator,
+        "get_weather": get_weather
+    }
 
-    if summary:
-        context = [
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part(
-                        text=f"Memory summary:\n{summary}"
+    # Agent Loop
+    while True:
+
+        context = contents
+
+        if summary:
+            context = [
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            text=f"Memory summary:\n{summary}"
+                        )
+                    ]
+                )
+            ] + contents
+
+        # if memory:
+        #         context = [
+        #             types.Content(
+        #                 role="user",
+        #                 parts=[
+        #                     types.Part(
+        #                         text=f"Long-term memory:\n{memory}"
+        #                     )
+        #                 ]
+        #             )
+        #         ] + context
+
+        # print("Debug memory:", memory)
+        # print("Debug context:", context)
+
+        # Ask Gemin wants to use a tool
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite",
+            contents=context,
+            config=types.GenerateContentConfig(
+                tools=[tools],
+                system_instruction=f"""
+            You are an AI assistant.
+
+            Long-term memory:
+            {memory}
+            """
+
+            ),
+        )
+
+
+        # Check if Gemini wants to use a tool
+        if response.function_calls:
+
+            # Gemini tool call response
+            contents.append(response.candidates[0].content)
+
+            # Tool response collect
+            tool_response_parts = []
+
+            # Gemini Tool calls requested
+            for function_call in response.function_calls:
+
+                print("Tool requested:", function_call.name)
+                print("Arguments:", function_call.args)
+
+                # Find the requested tool
+                tool = available_tools.get(function_call.name)
+
+
+                if tool is None:
+                    raise ValueError(
+                        f"Unknown tool requested: {function_call.name}"
                     )
-                ]
-            )
-        ] + contents
 
-    # if memory:
-    #         context = [
-    #             types.Content(
-    #                 role="user",
-    #                 parts=[
-    #                     types.Part(
-    #                         text=f"Long-term memory:\n{memory}"
-    #                     )
-    #                 ]
-    #             )
-    #         ] + context
+                try:
 
-    # print("Debug memory:", memory)
-    # print("Debug context:", context)
+                    # Execute the selected tool
+                    result = tool(**function_call.args)
 
-    # Ask Gemin wants to use a tool
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-lite",
-        contents=context,
-        config=types.GenerateContentConfig(
-            tools=[tools],
-            system_instruction=f"""
-        You are an AI assistant.
+                    print("Tool result:", result)
 
-        Long-term memory:
-        {memory}
-        """
+                    tool_response = {
+                        "result": result
+                    }
 
-        ),
-    )
+                except Exception as e:
 
+                    print("Tool error:", str(e))
 
-    # Check if Gemini wants to use a tool
-    if response.function_calls:
+                    tool_response = {
+                        "error": str(e)
+                    }
 
-        # Gemini tool call response
-        contents.append(response.candidates[0].content)
-
-        # Tool response collect
-        tool_response_parts = []
-
-        # Gemini Tool calls requested
-        for function_call in response.function_calls:
-
-            print("Tool requested:", function_call.name)
-            print("Arguments:", function_call.args)
-
-            # Find the requested tool
-            tool = available_tools.get(function_call.name)
-
-
-            if tool is None:
-                raise ValueError(
-                    f"Unknown tool requested: {function_call.name}"
+                # Add tool response
+                tool_response_parts.append(
+                    types.Part.from_function_response(
+                        name=function_call.name,
+                        response=tool_response,
+                    )
+                )
+                
+                # Add tool result to cpnversation
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=tool_response_parts
+                    )
                 )
 
-            try:
+        else:
+            # No more tools needed 
+            print("Agent:", response.text)
 
-                # Execute the selected tool
-                result = tool(**function_call.args)
+            # Get next user message
+            user_question = input("You: ")
 
-                print("Tool result:", result)
+            if user_question.lower() in ["exit", "quit"]:
+                break
 
-                tool_response = {
-                    "result": result
-                }
+            turn_start_indexes.append(len(contents))
 
-            except Exception as e:
+            new_memory = extract_memory(user_question)
 
-                print("Tool error:", str(e))
+            if new_memory:
+                memory = merge_memory(memory, new_memory)
+                save_memory(memory)
 
-                tool_response = {
-                    "error": str(e)
-                }
+                print("Updated long-term memory:", memory)
 
-            # Add tool response
-            tool_response_parts.append(
-                types.Part.from_function_response(
-                    name=function_call.name,
-                    response=tool_response,
-                )
-            )
-            
-            # Add tool result to cpnversation
+            # Add next user message to conversation history
             contents.append(
                 types.Content(
                     role="user",
-                    parts=tool_response_parts
+                    parts=[
+                        types.Part(text=user_question)
+                    ]
                 )
             )
 
-    else:
-        # No more tools needed 
-        print("Agent:", response.text)
+            conversation_turns += 1
 
-        # Get next user message
-        user_question = input("You: ")
+            if conversation_turns > MAX_TURNS:
 
-        if user_question.lower() in ["exit", "quit"]:
-            break
+                trim_index = turn_start_indexes[1]
 
-        turn_start_indexes.append(len(contents))
+                old_history = contents[:trim_index]
 
-        new_memory = extract_memory(user_question)
+                summary = update_summary(old_history, summary)
 
-        if new_memory:
-            memory = merge_memory(memory, new_memory)
-            save_memory(memory)
+                print("Current summary:", summary)
+                # print("Old history:", old_history)
 
-            print("Updated long-term memory:", memory)
+                contents = contents[trim_index:]
 
-        # Add next user message to conversation history
-        contents.append(
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part(text=user_question)
+                turn_start_indexes = [
+                    index - trim_index
+                    for index in turn_start_indexes[1:]
                 ]
-            )
-        )
 
-        conversation_turns += 1
+                conversation_turns -= 1
 
-        if conversation_turns > MAX_TURNS:
+                print("Trimmed old turn")
 
-            trim_index = turn_start_indexes[1]
+            print("History length:", len(contents))
+            print("Conversation turns:", conversation_turns)
+            print("Turn start indexes:", turn_start_indexes)
 
-            old_history = contents[:trim_index]
 
-            summary = update_summary(old_history, summary)
+    # test_plan = generate_plan(
+    #     "Research RAG vs Fine-tuning and recommmend which one to use"
+    # )
 
-            print("Current summary:", summary)
-            # print("Old history:", old_history)
+    # print("Generated Plan: ")
+    # print(json.dumps(test_plan, indent=4))
 
-            contents = contents[trim_index:]
-
-            turn_start_indexes = [
-                index - trim_index
-                for index in turn_start_indexes[1:]
-            ]
-
-            conversation_turns -= 1
-
-            print("Trimmed old turn")
-
-        print("History length:", len(contents))
-        print("Conversation turns:", conversation_turns)
-        print("Turn start indexes:", turn_start_indexes)
+if __name__== "__main__":
+   main()
